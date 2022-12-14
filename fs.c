@@ -6,19 +6,18 @@
 #include <fcntl.h>
 #include <string.h>
 
-#define MAX_FILES_ALLOWED 64    // "Max 64 files at any given time"
-#define MAX_F_NAME 15   // "Max 15 character filenames"
-#define MAX_FILDES 32   // "Your library must support a maximum of 32 file descriptors that can be open simultaneously"
-#define STORAGE 4096 * 4096 * 2 // "The maximum file size is 16M (which is, 4,096 blocks, each 4K)"
+#define MAX_FILES_ALLOWED 64    // max 64 files at any given time
+#define MAX_F_NAME 15   // max 15 character filenames
+#define MAX_FILDES 32   // support a maximum of 32 file descriptors that can be open simultaneously
+#define STORAGE 4096 * 4096 // maximum file size is 16M (4,096 blocks, each 4K)
 #define DISK_BLOCKS 8192
 #define BLOCK_SIZE 4096
 
 // enumeration for file allocation table entries
 #define FREE -1         // empty slot in FAT
 #define END_MARKER -2   // denote end of file 
-#define RESERVED -3     // reserved FAT entry
 
-//  data structures
+// super block to store information of other data structures
 struct super_block {
     int fat_idx; // First block of the FAT
     int fat_len; // Length of FAT in blocks
@@ -27,6 +26,7 @@ struct super_block {
     int data_idx; // First block of file-data
 };
 
+// directory entry to stores file metadata
 struct dir_entry {
     int used; // Is this file-”slot” in use
     char name [MAX_F_NAME + 1]; // DOH!
@@ -37,6 +37,7 @@ struct dir_entry {
     // ref_cnt > 0 -> cannot delete file
 };
 
+// file descriptor used for file operations -- only meaningful while system is mounted
 struct file_descriptor {
     int used; // fildes in use
     int file; // the first block of the file (f) to which fildes refers too
@@ -44,12 +45,12 @@ struct file_descriptor {
 };
 
 // global variables and data structures
-struct super_block *fs;
-struct file_descriptor fildes_array[MAX_FILDES]; // 32
-int *FAT; // Will be populated with the FAT data
-struct dir_entry *DIR; // Will be populated with the directory data
+struct super_block *fs; // super block
+struct file_descriptor fildes_array[MAX_FILDES]; // array of 32 file descriptors
+int *FAT;               // to be populated with the FAT data
+struct dir_entry *DIR;  // to be populated with the directory data
 
-int file_counter = 0;   // number of files
+int file_counter = 0;   // number of files in system
 int mounted = 0;        // if file system has been mounted
 int validfs = 0;        // if valid file system has been created
 
@@ -63,28 +64,29 @@ int make_fs(char* disk_name) {
         return -1;
     }
 
-    // initialize values for the superblock
+    // initialize superblock
     fs = calloc(1, sizeof(struct super_block));
-    fs->fat_idx = 1;    // first block of FAT
-    fs->fat_len = 4;    // length of FAT in blocks (8192 * 4 / 4098)
-    fs->dir_idx = 5;    // first block of directory (4 + 1)
-    fs->dir_len = 0;    // length of directory in files
-    fs->data_idx = 6;   // first block of file-data (5 + 1)
+    fs->fat_idx = 1;    
+    fs->fat_len = 4;
+    fs->dir_idx = fs->fat_len + fs->fat_idx;
+    fs->dir_len = 1;    
+    fs->data_idx = fs->dir_len + fs->dir_idx;
 
     // initialize file allocation table
     FAT = calloc(DISK_BLOCKS, sizeof(int));
     int i;
+
     for (i = 0; i < DISK_BLOCKS; i++) {
-        if (i < (fs->fat_len)) {
-            FAT[i] = RESERVED;  // reserve blocks 0 to 3 for metadata
-        }
-        else {
-            FAT[i] = FREE;
+        FAT[i] = FREE;
+    }
+    for (i = 0; i < (fs->fat_len); i++) {
+        if (block_write(i + fs->fat_idx, (char *) (FAT + i *  BLOCK_SIZE)) == -1) {
+            return -1;
         }
     }
-
+    
+    // initialize directory table
     DIR = calloc(MAX_FILES_ALLOWED, sizeof(struct dir_entry));
-
     if (block_write(0, (char*) fs) == -1) {
         return -1;
     }
@@ -92,12 +94,6 @@ int make_fs(char* disk_name) {
         return -1;
     }
 
-    for (i = 0; i < (fs->fat_len); i++) {
-        if (block_write(i + fs->fat_idx, (char *) (FAT + i *  BLOCK_SIZE)) == -1) {
-            return -1;
-        }
-        
-    }
     // ready to mount
     validfs = 1;    
     mounted = 0;
@@ -105,35 +101,42 @@ int make_fs(char* disk_name) {
     return close_disk(disk_name);
 }
 
+// mount file system stored on virtual disk
 int mount_fs(char *disk_name) {
+    // check if disk is available to mount
     if (mounted || !validfs) {
         return -1;
     }
 
+    // open disk
     if (open_disk(disk_name)) {
         return -1;
     }
 
+    // read super block info
     if (block_read(0, (char*) fs) == -1) {
         return -1;
-    }
-        
+    }   
+
+    // read FAT info
     int i;
     for (i = 0; i < (fs->fat_len); i++) {
         if (block_read(i + fs->fat_idx, (char*) (FAT + i * BLOCK_SIZE)) == -1) {
             return -1;
         }
-        
     }
 
+    // read directory info
     if (block_read(fs->dir_idx, (char*) DIR) == -1) {
         return -1;
     }
 
+    // initialize reference count of file descriptor entries
     for (i = 0; i < MAX_FILES_ALLOWED; i++) {
         DIR[i].ref_cnt = 0;
     }
 
+    // initialize file descriptors
     for (i = 0; i < MAX_FILDES; i++) {
         fildes_array[i].used = 0;
         fildes_array[i].file = FREE;
@@ -144,16 +147,19 @@ int mount_fs(char *disk_name) {
     return 0;
 }
 
+// unmounts file system from virtual disk
 int umount_fs(char *disk_name) {
-
+    // check if mounted
     if (!mounted) {
         return -1;
     }
 
+    // write super block info
     if (block_write(0, (char*) fs) == -1) {
         return -1;
     }
     
+    // write FAT info
     int i;
     for (i = 0; i < (fs->fat_len); i++) {
         if (block_write(i + (fs->fat_idx), (char*) (FAT + i * BLOCK_SIZE))) {
@@ -161,48 +167,49 @@ int umount_fs(char *disk_name) {
         }
     }
 
+    // write directory info
     if (block_write(fs->dir_idx, (char*) DIR) == -1) {
         return -1;
     }
 
     // file descripters no longer meaningful after umount
     for (i = 0; i < MAX_FILDES; i++) {
-        // if (fildes_array[i].used) {
-        //     fildes_array[i].used = 0;
-        //     fildes_array[i].file = FREE;
-        //     fildes_array[i].offset = 0;
-        // }
         fildes_array[i].used = 0;
         fildes_array[i].file = FREE;
         fildes_array[i].offset = 0;
     }
 
-    mounted = 0;
-
+    // close disk
     if (close_disk(disk_name) == -1) {
         return -1;
     }
 
+    // no longer mounted
+    mounted = 0;
     
     return 0;
 }
 
+// open file for reading and writing
 int fs_open(char *name) {
-
+    // return if no files exist
     if (file_counter == 0) {
         return -1;
     }
 
     int i;
     for (i = 0; i < MAX_FILES_ALLOWED; i++) {
+        // check if file name already exists
         if (strcmp(DIR[i].name, name) == 0) {
             break;
         }
+        // check if multiple files reached
         if (i >= MAX_FILES_ALLOWED - 1) {
             return -1;
         }
     }
 
+    // find available file descriptor to assign to file
     int j;
     for (j = 0; j < MAX_FILDES; j++) {
         if (fildes_array[j].used == 0) {
@@ -213,34 +220,34 @@ int fs_open(char *name) {
             return j;
         }
     }
-    return -1;
 
+    // return error if no available descriptors
+    return -1;
 }
 
+// close file specified by file descriptor
 int fs_close(int fildes) {
     if (fildes >= MAX_FILDES || fildes < 0) {
         return -1;
     }
 
+    // locate file
     int i;
     for (i = 0; i < MAX_FILES_ALLOWED; i++) {
-        // file found
         if (DIR[i].head == fildes_array[fildes].file && fildes_array[fildes].used) {
             DIR[i].ref_cnt--;
             fildes_array[fildes].used = 0;
             fildes_array[fildes].file = FREE;
             fildes_array[fildes].offset = 0;
-            //file_counter--;
             return 0;
         }
-        // file not found
-        // if (i >= MAX_FILES_ALLOWED - 1;) {
-        //     return -1;
-        
     }
+
+    // return error if file not found
     return -1;
 }
 
+// create new file in root directory
 int fs_create(char *name) {
 
     // check if maximum files reached
@@ -261,21 +268,21 @@ int fs_create(char *name) {
         }
     }
 
-    // 
-
+    // locate available slot in FAT
     for (i = fs->data_idx; i < DISK_BLOCKS; i++) {
         if (FAT[i] == FREE) {
             FAT[i] = END_MARKER;
             break;
         }
+        // return error if no available slots
         if (i >= DISK_BLOCKS) {
             return -1;
         }
     }
 
+    // locate available slot in directory
     int j;
     for (j = 0; j < MAX_FILES_ALLOWED; j++) {
-        // free slot found
         if (!DIR[j].used) {
             file_counter++;
             DIR[j].used = 1;
@@ -288,18 +295,21 @@ int fs_create(char *name) {
         }
     }
 
-    // return -1 if all slots occupied
+    // return error if no available slots
     return -1;
 }
 
+// delete file from root directory
 int fs_delete(char *name) {
+    // check if name valid
     if (strlen(name) > MAX_F_NAME) {
         return -1;
     }
 
+    // locate file
     int i;
     for (i = 0; i < MAX_FILES_ALLOWED; i++) {
-        // file found, reference count = 0
+        // check name and reference counter (can not delete if reference counter < 0)
         if (strcmp(DIR[i].name, name) == 0 && DIR[i].ref_cnt == 0) {
             int next;
             int block = DIR[i].head;
@@ -311,93 +321,26 @@ int fs_delete(char *name) {
                 }
                 block = next;
             }
+            // update directory entry
             DIR[i].used = 0;
             DIR[i].size = 0;
             DIR[i].head = FREE;
-            //DIR[i].name = '';
-            memset(DIR[i].name, '\0', strlen(DIR[i].name)); // + 1
+            memset(DIR[i].name, '\0', strlen(DIR[i].name));
+
+            // update directory length and file counter
             fs->dir_len--;
             file_counter--;
             return 0;
         }
-        // file not found
-        // if (i >= MAX_FILES_ALLOWED - 1) {
-        //     return -1;
-        // }
     }
+
+    // return error if file not found
     return -1;
 }
 
+// read nbytes of data into buffer
 int fs_read(int fildes, void *buf, size_t nbyte) {
-    //int bytes_read = 0;
-    
-    if (fildes > MAX_FILDES || fildes < 0 || nbyte < 0) {
-        return -1;
-    }
-    if (!fildes_array[fildes].used) {
-        return -1;
-    }
-
-    int entry;
-    for (entry = 0; entry < MAX_FILES_ALLOWED; entry++) {
-        if (fildes_array[fildes].file == DIR[entry].head) {
-            break;
-        }
-        if (entry >= MAX_FILES_ALLOWED - 1) {
-            return -1;
-        }
-    }
-
-    if (nbyte + fildes_array[fildes].offset > DIR[entry].size) {
-        nbyte = DIR[entry].size - fildes_array[fildes].offset;
-    }
-
-    // int blocks[BLOCK_SIZE];
-    // int i;
-    // for (i = 0; i < BLOCK_SIZE; i++) {
-    //     blocks[i] = FREE;
-    // }
-    char blocks[BLOCK_SIZE];
-    memset(blocks, FREE, BLOCK_SIZE);
-
-    char* buffer = (char *) calloc(1, nbyte * sizeof(char));
-    memset(buffer, 0, nbyte);
-    int offset = fildes_array[fildes].offset;
-    int block = fildes_array[fildes].file;
-
-    // offset = BLOCK_SIZE % offset;
-	while(offset >= BLOCK_SIZE){
-		offset -= BLOCK_SIZE;
-		block = FAT[block];
-	}
-
-    int remaining = nbyte;
-    int reading = 0;
-    while (remaining > 0) {
-        block_read(block, blocks);
-        int i;
-        for (i = offset; i < BLOCK_SIZE; i++) {
-            buffer[reading] = blocks[i];
-            reading++;
-            remaining--;
-            if (!remaining) {
-                break;
-            }
-        }
-        if (remaining) {
-            block = FAT[block];
-            offset = 0;
-        }
-    }
-    memcpy(buf, buffer, nbyte);
-    
-    return nbyte;
-}
-
-int fs_write(int fildes, void *buf, size_t nbyte) {
-    int bytes_written = 0;
-    int remaining;
-
+    // check if file descriptor and nbyte input are valid    
     if (fildes > MAX_FILDES || fildes < 0 || nbyte < 0) {
         return -1;
     }
@@ -408,21 +351,103 @@ int fs_write(int fildes, void *buf, size_t nbyte) {
         return 0;
     }
 
+    // locate file
     int entry;
     for (entry = 0; entry < MAX_FILES_ALLOWED; entry++) {
         if (fildes_array[fildes].file == DIR[entry].head) {
             break;
         }
+        // return error if file not found
         if (entry >= MAX_FILES_ALLOWED - 1) {
             return -1;
         }
     }
 
+    // update bytes to read if needed
+    if (nbyte + fildes_array[fildes].offset > DIR[entry].size) {
+        nbyte = DIR[entry].size - fildes_array[fildes].offset;
+    }
+
+    // allocate character buffers
+    char blocks[BLOCK_SIZE];
+    memset(blocks, FREE, BLOCK_SIZE);
+    char* buffer = (char *) calloc(1, nbyte * sizeof(char));
+    memset(buffer, 0, nbyte);
+    int offset = fildes_array[fildes].offset;
+    int block = fildes_array[fildes].file;
+
+    // go to first block
+	while(offset >= BLOCK_SIZE){
+		offset -= BLOCK_SIZE;
+		block = FAT[block];
+	}
+
+    int remaining = nbyte;
+    int reading = 0;
+    while (remaining > 0) {
+        // read into buffer
+        block_read(block, blocks);
+        int i;
+        for (i = offset; i < BLOCK_SIZE; i++) {
+            buffer[reading] = blocks[i];
+            reading++;
+            remaining--;
+            // stop loop once all bytes read
+            if (!remaining) {
+                break;
+            }
+        }
+        // go to next block if still reading
+        if (remaining) {
+            block = FAT[block];
+            offset = 0;
+        }
+    }
+
+    // copy into input buffer
+    memcpy(buf, buffer, nbyte);
+    
+    // return number of bytes read
+    return nbyte;
+}
+
+// write nbytes of data from buffer
+int fs_write(int fildes, void *buf, size_t nbyte) {
+    int bytes_written = 0;
+    int remaining;
+
+    // check if file descriptor and nbyte input are valid
+    if (fildes > MAX_FILDES || fildes < 0 || nbyte < 0) {
+        return -1;
+    }
+    if (!fildes_array[fildes].used) {
+        return -1;
+    }
+    if (nbyte == 0) {
+        return 0;
+    }
+
+    // locate file
+    int entry;
+    for (entry = 0; entry < MAX_FILES_ALLOWED; entry++) {
+        if (fildes_array[fildes].file == DIR[entry].head) {
+            break;
+        }
+        // return error if file not found
+        if (entry >= MAX_FILES_ALLOWED - 1) {
+            return -1;
+        }
+    }
+
+    // if read will exceed storage space --> update nbyte
     if (nbyte + fildes_array[fildes].offset > STORAGE) {
         nbyte = STORAGE - fildes_array[fildes].offset;
     }
+
+    // bytes to write
     remaining = nbyte;
 
+    // allocate buffers
     char blocks[BLOCK_SIZE];
     memset(blocks, FREE, BLOCK_SIZE);
 
@@ -436,6 +461,7 @@ int fs_write(int fildes, void *buf, size_t nbyte) {
     }
 
     while (remaining > 0) {
+        // update eof marker
         if (block == END_MARKER) {
             int j;
             for (j = fs->data_idx; j < DISK_BLOCKS; j++) {
@@ -452,11 +478,10 @@ int fs_write(int fildes, void *buf, size_t nbyte) {
             return -1;
         }
 
+        // write to buffer
         int i;
         for (i = offset; i < BLOCK_SIZE; i++) {
-
             blocks[i] = *((char *) buf + bytes_written);
-
             bytes_written++;
             fildes_array[fildes].offset++;
             remaining--;
@@ -467,6 +492,7 @@ int fs_write(int fildes, void *buf, size_t nbyte) {
                 return bytes_written;
             }
         }
+        // go to next block if still reading
         if (remaining) {
             if (block_write(block, blocks) == -1) {
                 return -1;
@@ -477,14 +503,17 @@ int fs_write(int fildes, void *buf, size_t nbyte) {
         }
     }
 
+    // load block
     if (block_write(block, blocks) == -1) {
         return -1;
     }
-    // DIR[entry].size += bytes_written;
+
+    // update file size
     if (DIR[entry].size < fildes_array[fildes].offset) {
         DIR[entry].size = fildes_array[fildes].offset;
     }   
 
+    // return number of bytes written
     return bytes_written;
 }
 
@@ -507,46 +536,31 @@ int fs_get_filesize(int fildes) {
     return -1;
 }
 
+// creates and populates array of file names currently known to file system
 int fs_listfiles(char ***files) {
-
+    // allocate new list
     char** list = calloc(MAX_FILES_ALLOWED, sizeof(char*));
 
-    //printf("list allocated\n");
-    
-    // if (file_counter == 0) {
-    //     *files = list;
-    //     return -0;
-    // }
-    // else if (!mounted || !validfs) {
-    //     return -1;
-    // }
-
-    //printf("setup done\n");
-
+    // locate in-use entries
     int i;
     int j = 0;
-
     for (i = 0; i < MAX_FILES_ALLOWED; i++) {
-        //printf("i: %d\n", i);
         if (DIR[i].used) {
-            //printf("Entry name: %s \n", DIR[i].name);
+            // append entry name to list
             *(list + j) = DIR[i].name;
-            //strcpy(list[j], DIR[i].name);
-
-            //printf("name copied\n");
-
             j++;
         }
     }
-    *(list + j) = NULL; // terminate array
+    // terminate array
+    *(list + j) = NULL;
 
-    //printf("list terminated\n");
-
+    // update input pointer
     *files = list;
 
     return 0;   
 }
 
+// sets file pointer (offset used for read and write operations)
 int fs_lseek(int fildes, off_t offset) {
     int file_size = fs_get_filesize(fildes);
 
@@ -560,15 +574,18 @@ int fs_lseek(int fildes, off_t offset) {
         return -1;
     }
 
+    // invalid fildes
     if (!fildes_array[fildes].used) {
         return -1;
     }
     
+    // update offset
     fildes_array[fildes].offset = offset;
 
     return 0;
 }
 
+// truncate file to (length) bytes in size
 int fs_truncate(int fildes, off_t length) {
     // out of range
     if (fildes >= MAX_FILDES || fildes < 0 || length > STORAGE || length < 0) {
@@ -582,38 +599,47 @@ int fs_truncate(int fildes, off_t length) {
 
     int i;
     for (i = 0; i < MAX_FILES_ALLOWED; i++) {
+        // locate directory entry
         if (DIR[i].head == fildes_array[fildes].file) {
 
+            // check if entry size already smaller than truncation length
             if (DIR[i].size < length) {
                 return -1;
             }
+            // if entry size same as truncation length --> do nothing
             else if (DIR[i].size == length) {
                 return 0;
             }
 
-            DIR[i].size = length;
-            //fildes_array[i].offset = min(DIR[i].offset, length);
+            // update file descriptor offset if needed
             if (fildes_array[fildes].offset > length) {
                 fildes_array[fildes].offset = length;
             }
-            
+
+            // go to new boundary block
             int block = DIR[i].head;
             int j;
-            for (j = 0; j <= length / BLOCK_SIZE; j++) {
+            for (j = 0; j < length / BLOCK_SIZE; j++) {
                 block = FAT[block];
             }
             int last = block;
             int traverse = FAT[block];
 
+            // free truncated blocks
             while (traverse > 0) {
                 traverse = FAT[traverse];
                 FAT[traverse] = FREE;
             }
+
+            // mark end
             FAT[last] = END_MARKER;
+
+            // update entry size
+            DIR[i].size = length;
             
             return 0;
         }
     }
 
-    return -1;
+    return -1;   
 }
