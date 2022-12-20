@@ -199,7 +199,7 @@ int fs_open(char *name) {
 
     int i;
     for (i = 0; i < MAX_FILES_ALLOWED; i++) {
-        // check if file name already exists
+        // check if file exists
         if (strcmp(DIR[i].name, name) == 0) {
             break;
         }
@@ -492,7 +492,7 @@ int fs_write(int fildes, void *buf, size_t nbyte) {
                 return bytes_written;
             }
         }
-        // go to next block if still reading
+        // go to next block if still writing
         if (remaining) {
             if (block_write(block, blocks) == -1) {
                 return -1;
@@ -517,6 +517,7 @@ int fs_write(int fildes, void *buf, size_t nbyte) {
     return bytes_written;
 }
 
+// return current size of file
 int fs_get_filesize(int fildes) {
     // out of range
     if (fildes >= MAX_FILDES || fildes < 0) {
@@ -611,7 +612,7 @@ int fs_truncate(int fildes, off_t length) {
                 return 0;
             }
 
-            // update file descriptor offset if needed
+            // update file descriptor offset
             if (fildes_array[fildes].offset > length) {
                 fildes_array[fildes].offset = length;
             }
