@@ -1,8 +1,13 @@
-all: disk.o fs.o
+SRCDIR = src
+BUILDDIR = build
 
-disk.o: disk.c disk.h
+all: $(BUILDDIR)/disk.o $(BUILDDIR)/fs.o
 
-fs.o: fs.c fs.h
+$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(SRCDIR)/%.h | $(BUILDDIR)
+	gcc -c $< -o $@
+
+$(BUILDDIR):
+	mkdir -p $(BUILDDIR)
 
 clean:
-	rm -f disk.o fs.o
+	rm -rf $(BUILDDIR)
